@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -13,6 +14,7 @@ var (
 	Token        string
 	state        int
 	participants []*discordgo.User
+	threadID     string
 )
 
 func init() {
@@ -37,6 +39,22 @@ func startGame(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	// リアクションが追加されたイベントを捕捉
 	s.AddHandler(func(s *discordgo.Session, r *discordgo.MessageReactionAdd) {
+		// リアクションがボット自身によるものであれば無視
+		if r.UserID == s.State.User.ID {
+			return
+		}
+
+		if r.MessageID == msg.ID {
+			if r.Emoji.Name == "👍" && state == 1 { // 参加者のカウントが進行中の場合のみユーザを追加
+				user, err := s.User(r.UserID)
+				if err != nil {
+					fmt.Println("Error getting user:", err)
+					return
+				}
+				participants = append(participants, user)
+			}
+		}
+
 		if r.MessageID == msg.ID && r.UserID != s.State.User.ID {
 			if r.Emoji.Name == "✅" {
 				// ✅リアクションが検出されたら、参加者のカウントを停止
@@ -46,17 +64,35 @@ func startGame(s *discordgo.Session, m *discordgo.MessageCreate) {
 				for _, p := range participants {
 					fmt.Println(p.Username)
 				}
-				return
-			}
+				// 現在の時刻を取得
+				now := time.Now()
+				// スレッドの名前を時刻を基に設定
+				threadName := fmt.Sprintf("ゲーム-%s", now.Format("2006-01-02 15:04:05"))
 
-			if state == 1 { // 参加者のカウントが進行中の場合のみユーザを追加
-				user, err := s.User(r.UserID)
+				// スレッドを作成
+				thread, err := s.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{
+					Name:                threadName,
+					AutoArchiveDuration: 60,
+					Invitable:           false,
+					RateLimitPerUser:    0,
+				})
+				threadID = thread.ID
 				if err != nil {
-					fmt.Println("Error getting user:", err)
+					fmt.Println("Error creating thread:", err)
 					return
 				}
-				participants = append(participants, user)
+
+				// スレッド内で参加者全員にメンション
+				for _, p := range participants {
+					fmt.Println("メンションを送信します。")
+					message := fmt.Sprintf("<@%s> ゲームに参加ありがとうございます！", p.ID)
+					_, err := s.ChannelMessageSend(thread.ID, message)
+					if err != nil {
+						fmt.Println("Error sending message in thread:", err)
+					}
+				}
 			}
+			return
 		}
 	})
 }
@@ -96,6 +132,16 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		state = 0
 		participants = nil
 		s.ChannelMessageSend(m.ChannelID, "ゲームを終了しました。")
+
+		// スレッドをクローズする
+		archived := true
+		_, err := s.ChannelEditComplex(threadID, &discordgo.ChannelEdit{
+			Archived: &archived,
+		})
+		if err != nil {
+			fmt.Println("Error closing the thread:", err)
+			return
+		}
 	}
 
 	if strings.Contains(m.Content, s.State.User.Mention()) && strings.Contains(m.Content, "start") {
